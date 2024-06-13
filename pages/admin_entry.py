@@ -1,125 +1,142 @@
 import streamlit as st
-import pandas as pd
+import psycopg2
 
-# Define a session state to persist data across script reruns
-session_state = st.session_state
+# Function to handle form submission and insert data into the database
+def handle_submit(engine_type, engine_name, tech_assemblies, num_parts):
+    try:
+        # Connect to the PostgreSQL database
+        conn = psycopg2.connect(
+            dbname="avirahtech",
+            user="postgres",
+            password="1020",
+            host="localhost",
+            port="5432"
+        )
+        # Create a cursor object
+        cur = conn.cursor()
 
-# Initialize component list if it doesn't exist in the session state
-if 'component_list' not in session_state:
-    session_state.component_list = []
+        # Check if the engine_type already exists in engine_config
+        cur.execute("SELECT 1 FROM engine_config WHERE engtype = %s", (engine_type,))
+        if cur.fetchone() is None:
+            # Insert data into the engine_config table
+            cur.execute("INSERT INTO engine_config (engtype, engname) VALUES (%s, %s)",
+                        (engine_type, engine_name))
 
-def main():
-    st.title("Tech Assembly Counter")
+        # Generate the techassembly values
+        tech_assemblies_list = [f"{engine_name[:3]}T{i}" for i in range(1, tech_assemblies + 1)]
 
-    # Display inputs side by side
-    col1, col2 = st.columns([3, 2])
+        # Insert data into the engine_techassembly_map table
+        for tech_assembly in tech_assemblies_list:
+            cur.execute("INSERT INTO engine_techassembly_map (engtype, techassembly) VALUES (%s, %s)",
+                        (engine_type, tech_assembly))
 
-    with col1:
-        engine_type = st.text_input("Enter Engine Type")
+        # Insert data into the part_details table
+        for tech_assembly in tech_assemblies_list:
+            for i in range(num_parts):
+                part = f"{tech_assembly}P{i+1}"
+                cur.execute(
+                    "INSERT INTO part_details (engtype, part, techassembly, serial_presence, radial_presence, axial_tolerance, radial_tolerance) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (engine_type, part, tech_assembly, False, False, 0.0, 0.0)
+                )
 
-    with col2:
-        num_tech_assemblies = st.number_input("Enter Number of Tech Assemblies", min_value=3, value=3, step=1)
+        # Commit changes
+        conn.commit()
+        st.write("Data inserted successfully!")
+    except (Exception, psycopg2.Error) as error:
+        st.error(f"Error inserting data: {error}")
+    finally:
+        # Close connection
+        if conn:
+            cur.close()
+            conn.close()
 
-    st.subheader("Parts")
-    part_cols = st.columns(num_tech_assemblies)
-    for i, col in enumerate(part_cols):
-        with col:
-            st.button(f"Part {i+1}")
+# Function to handle search and display results
+def handle_search(engine_type, engine_name):
+    try:
+        # Connect to the PostgreSQL database
+        conn = psycopg2.connect(
+            dbname="avirahtech",
+            user="postgres",
+            password="1020",
+            host="localhost",
+            port="5432"
+        )
+        # Create a cursor object
+        cur = conn.cursor()
 
-    # Place form and table side by side
-    form_col, table_col = st.columns([1, 2])
+        # Search for engine configurations
+        cur.execute("SELECT pd.part, pd.techassembly, pd.serial_presence, pd.radial_presence, pd.axial_tolerance, pd.radial_tolerance FROM part_details pd WHERE pd.engtype = %s", (engine_type,))
+        rows = cur.fetchall()
 
-    with form_col:
-        st.subheader("Add Component Details")
+        if rows:
+            st.subheader("Search Results:")
+            table_content = "<table><tr><th>Tech Assembly</th><th>Part</th><th>Serial Presence</th><th>Radial Presence</th><th>Serial Tolerance</th><th>Radial Tolerance</th></tr>"
+            prev_tech_assembly = None
+            for row in rows:
+                tech_assembly = row[1]
+                part = row[0]
+                serial_presence = row[2]
+                radial_presence = row[3]
+                serial_tolerance = row[4]
+                radial_tolerance = row[5]
 
-        # Text input for component
-        component = st.text_input("Component")
+                # Display the data in the table
+                if prev_tech_assembly == tech_assembly:
+                    tech_assembly_display = ""
+                else:
+                    tech_assembly_display = tech_assembly
+                    prev_tech_assembly = tech_assembly
 
-        # Radial buttons for axial and radial measurements presence
-        with st.expander("Select Measurements"):
-            axial_present = st.radio("Axial Measurements", options=["Present", "Not Present"], key="axial_present")
-            radial_present = st.radio("Radial Measurements", options=["Present", "Not Present"], key="radial_present")
+                table_content += f"<tr><td>{tech_assembly_display}</td><td>{part}</td><td><input type='radio' name='serial_presence_{tech_assembly}_{part}' {'checked' if serial_presence else ''}></td><td><input type='radio' name='radial_presence_{tech_assembly}_{part}' {'checked' if radial_presence else ''}></td><td><input type='number' step='0.1' name='serial_tolerance_{tech_assembly}_{part}' value='{serial_tolerance}'></td><td><input type='number' step='0.1' name='radial_tolerance_{tech_assembly}_{part}' value='{radial_tolerance}'></td></tr>"
+            table_content += "</table>"
+            st.markdown(table_content, unsafe_allow_html=True)
 
-        # Number inputs for tolerance for axial and radial
-        with st.expander("Enter Tolerance"):
-            axial_tolerance = st.number_input("Axial Tolerance (microns)", key="axial_tolerance")
-            radial_tolerance = st.number_input("Radial Tolerance (microns)", key="radial_tolerance")
+            if st.button("Submit"):
+                # Update values in the table based on user input
+                for row in rows:
+                    tech_assembly = row[1]
+                    part = row[0]
+                    serial_presence = bool(st.radio(f"Serial Presence for {tech_assembly} {part}", options=[False, True], index=1 if row[2] else 0))
+                    radial_presence = bool(st.radio(f"Radial Presence for {tech_assembly} {part}", options=[False, True], index=1 if row[3] else 0))
+                    serial_tolerance = st.number_input(f"Serial Tolerance for {tech_assembly} {part}", value=row[4], step=0.1)
+                    radial_tolerance = st.number_input(f"Radial Tolerance for {tech_assembly} {part}", value=row[5], step=0.1)
 
-        if st.button("Add Component"):
-            # Create a dictionary to store component details
-            component_details = {
-                "Component": component,
-                "Axial-Measurements": axial_present,
-                "Radial-Measurements": radial_present,
-                "Radial-Tolerance(microns)": radial_tolerance,
-                "Axial-Tolerance(microns)": axial_tolerance
-            }
+                    # Update values in the database (Replace this with your actual update logic)
+                    cur.execute("UPDATE part_details SET serial_presence = %s, radial_presence = %s, axial_tolerance = %s, radial_tolerance = %s WHERE engtype = %s AND part = %s", (serial_presence, radial_presence, serial_tolerance, radial_tolerance, engine_type, part))
 
-            # Append the dictionary to the session state component list
-            session_state.component_list.append(component_details)
+                conn.commit()
+                st.write("Values updated successfully!")
 
-            # Clear the form fields
-            st.session_state["Component"] = ""
-            st.session_state["axial_present"] = "Present"
-            st.session_state["radial_present"] = "Present"
-            st.session_state["axial_tolerance"] = 0
-            st.session_state["radial_tolerance"] = 0
 
-    with table_col:
-        # Convert the session state component list to a DataFrame
-        df = pd.DataFrame(session_state.component_list)
+        else:
+            st.write("No matching records found.")
 
-        # Display the table using HTML without vertical border lines
-        st.subheader("Assembly Details")
-        st.write(get_table_html(df), unsafe_allow_html=True)
+    except (Exception, psycopg2.Error) as error:
+        st.error(f"Error searching data: {error}")
+    finally:
+        # Close connection
+        if conn:
+            cur.close()
+            conn.close()
 
-        # Check if any row is selected for deletion
-        row_to_delete = st.selectbox("Select Row to Delete", [None] + list(df.index))
+# Create the option containers
+option = st.sidebar.radio("Choose an option:", [ "Create New", "Search"])
 
-        # Delete the selected row
-        if row_to_delete is not None:
-            df = df.drop(index=row_to_delete)
-            st.write("Row deleted successfully!")
+# Display content based on the selected option
 
-        # Update the session state with the modified DataFrame
-        session_state.component_list = df.to_dict(orient="records")
+if option == "Create New":
+    st.subheader("Create New")
+    engine_type = st.text_input("Engine Type:")
+    engine_name = st.text_input("Engine Name:")
+    tech_assemblies = st.number_input("Number of Tech Assemblies:", step=1, min_value=3, value=3)
+    num_parts = st.number_input("Number of Parts:", step=1, min_value=1)
 
-def get_table_html(df):
-    # Create HTML table string without vertical border lines
-    table_html = """
-    <style>
-    table {
-        border-collapse: collapse;
-        width: 100%;
-    }
-    th, td {
-        border: none;
-        padding: 8px;
-        text-align: left;
-    }
-    tr:nth-child(even) {
-        background-color: #FAF9F6;
-        color: black;
-    }
-    th {
-        background-color: #ADD8E6;
-        color: black;
-    }
-    </style>
-    <table>
-    <tr>"""
-    for col in df.columns:
-        table_html += f"<th>{col}</th>"
-    table_html += "</tr>"
+    if st.button("Submit"):
+        handle_submit(engine_type, engine_name, tech_assemblies, num_parts)
+elif option == "Search":
+    st.subheader("Search")
+    engine_type_search = st.text_input("Enter Engine Type to search:")
+    engine_name_search = st.text_input("Enter Engine Name to search:")
 
-    for index, row in df.iterrows():
-        table_html += "<tr>"
-        for value in row:
-            table_html += f"<td contenteditable='true'>{value}</td>"
-        table_html += "</tr>"
-
-    table_html += "</table>"
-    return table_html
-
-if __name__ == "__main__":
-    main()
+    if st.button("Search"):
+        handle_search(engine_type_search, engine_name_search)
